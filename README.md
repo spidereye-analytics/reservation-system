@@ -158,6 +158,8 @@ pytest
    - Develop a notification system for appointment reminders
    - Add support for recurring appointments
    - Implement a provider rating and review system
+   - Add CI/CD (likely GitHub Actions) for automated regression/integration testing and deployment
+   - Add rolling deployments
 
 5. **Monitoring and Logging**
    - Set up comprehensive logging and error tracking
