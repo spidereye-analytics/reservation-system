@@ -8,21 +8,35 @@ from alembic import command
 from alembic.config import Config
 import os
 import logging
+from prometheus_fastapi_instrumentator import Instrumentator
 from .app.routes import router
 from .app.cache_checker import check_and_sync_cache
 from .app.models import Base
 from .app.dependencies import get_redis_client
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+
 app = FastAPI()
 
 # Database configuration: This must be done before accessing db.session anywhere
-app.add_middleware(DBSessionMiddleware, db_url=os.getenv('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/reservation'))
+app.add_middleware(DBSessionMiddleware,
+                   db_url=os.getenv('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/reservation'))
 
 # Include the main router: Ensure this is done after DBSessionMiddleware is added
 app.include_router(router)
 
+# Instrument the app with Prometheus metrics
+Instrumentator().instrument(app).expose(app, include_in_schema=False, endpoint="/metrics")
+
+
 def start_server():
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
 
 def create_tables():
     database_url = os.getenv('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/reservation')
@@ -31,13 +45,15 @@ def create_tables():
     Base.metadata.create_all(engine)
     print("Database tables created successfully.")
 
+
 def run_migrations(action, revision=None, message=None):
     # Inline Alembic configuration
     database_url = os.getenv('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/reservation')
 
     alembic_cfg = Config()
     alembic_cfg.set_main_option('sqlalchemy.url', database_url)
-    alembic_cfg.set_main_option('script_location', 'alembic')  # Adjust this if your migrations are in a different directory
+    alembic_cfg.set_main_option('script_location',
+                                'alembic')  # Adjust this if your migrations are in a different directory
 
     if action == "upgrade":
         command.upgrade(alembic_cfg, "head")
@@ -56,10 +72,12 @@ def run_migrations(action, revision=None, message=None):
     else:
         print("Invalid action specified for migrations.")
 
+
 def clear_redis_cache():
     redis_client = get_redis_client()
     redis_client.flushall()
     print("Redis cache cleared successfully.")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Reservation System Application")
@@ -105,6 +123,7 @@ def main():
             run_migrations(args.action, args.revision, args.message)
     elif args.mode == 'clear-cache':
         clear_redis_cache()
+
 
 if __name__ == "__main__":
     main()

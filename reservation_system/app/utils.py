@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from typing import List
 
 from sqlalchemy.orm import Session
-from .models import AppointmentSlot, Reservation
+from .models import AppointmentSlot
 
 
 def parse_time_string(time_str):
@@ -131,22 +131,3 @@ def generate_time_slots(general_schedule, exceptions, manual_appointment_slots):
     return sorted(time_slots, key=lambda x: x['start'])
 
 
-def cancel_appointments(appointments: List[Reservation], db: Session):
-    """
-    Cancel the given list of appointments within a transaction.
-
-    :param appointments: List of reservations to be canceled.
-    :param db: The database session.
-    """
-    try:
-        # Start a transaction
-        for appointment in appointments:
-            appointment.status = "canceled"
-            db.add(appointment)
-
-        # Commit the transaction if all cancellations are successful
-        db.commit()
-    except Exception as e:
-        # Rollback the transaction in case of failure
-        db.rollback()
-        raise e  # Optionally re-raise the exception to be handled further up the call stack

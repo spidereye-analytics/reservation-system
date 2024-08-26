@@ -1,0 +1,14 @@
+alembic==1.13.2
+fastapi==0.112.2
+FastAPI_SQLAlchemy==0.2.1
+passlib==1.7.4
+pydantic==2.8.2
+pytest==8.3.2
+python_jose==3.3.0
+redis==5.0.8
+Requests==2.32.3
+SQLAlchemy==2.0.31
+uvicorn==0.30.6
+psycopg2-binary
+python-multipart
+prometheus_fastapi_instrumentator
