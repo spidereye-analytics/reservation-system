@@ -1,9 +1,15 @@
+import json
+import os
 import re
 from datetime import datetime, timedelta
 from typing import List
 
+from fastapi import HTTPException
 from sqlalchemy.orm import Session
-from .models import AppointmentSlot
+
+from .auth import get_password_hash
+from .dependencies import get_redis_client, UserRole
+from .models import AppointmentSlot, User
 
 
 def parse_time_string(time_str):
@@ -131,3 +137,67 @@ def generate_time_slots(general_schedule, exceptions, manual_appointment_slots):
     return sorted(time_slots, key=lambda x: x['start'])
 
 
+def validate_user_registration(name: str, email: str, password: str, role: str):
+    if not all([name, email, password, role]):
+        raise HTTPException(status_code=400, detail="All fields are required")
+    if role not in [UserRole.PROVIDER.value, UserRole.PATIENT.value, UserRole.ADMIN.value]:
+        raise HTTPException(status_code=400, detail="Invalid role")
+
+
+def get_or_create_user(db: Session, email: str, name: str, password: str, role: str):
+    existing_user = db.query(User).filter(User.email == email).first()
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    hashed_password = get_password_hash(password)
+    new_user = User(name=name, email=email, hashed_password=hashed_password, role=role)
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return new_user
+
+
+def get_available_slots(db: Session, provider_id: int, start_date: datetime, end_date: datetime):
+    redis_client = get_redis_client()
+    available_slots = []
+    current_date = start_date.date()
+    while current_date <= end_date.date():
+        cache_key = f"provider:{provider_id}:timeslots:{current_date.isoformat()}"
+        cached_time_slots = redis_client.get(cache_key)
+        if cached_time_slots:
+            daily_slots_serializable = json.loads(cached_time_slots)
+        else:
+            daily_slots_serializable = get_slots_from_db(db, provider_id, current_date)
+            redis_client.setex(cache_key, int(
+                os.getenv('CACHE_EXPIRY_SECONDS', 3600)),
+                               json.dumps(daily_slots_serializable))
+        available_slots.extend([slot for slot in daily_slots_serializable if slot['status'] == 'available'])
+        current_date += timedelta(days=1)
+    return available_slots
+
+
+def get_slots_from_db(db: Session, provider_id: int, date: datetime.date):
+    next_day = date + timedelta(days=1)
+    daily_slots = db.query(AppointmentSlot).filter(
+        AppointmentSlot.provider_id == provider_id,
+        AppointmentSlot.start_time >= date,
+        AppointmentSlot.start_time < next_day
+    ).all()
+    return [serialize_slot(slot) for slot in daily_slots]
+
+
+def serialize_slot(slot: AppointmentSlot, include_private_info: bool = False):
+    serialized = {
+        "id": slot.id,
+        "provider_id": slot.provider_id,
+        "start_time": slot.start_time.isoformat(),
+        "end_time": slot.end_time.isoformat(),
+        "status": slot.status,
+    }
+    if include_private_info:
+        serialized.update({
+            "client_id": slot.client_id,
+            "reserved_by": slot.reserved_by,
+            "reserved_until": slot.reserved_until.isoformat() if slot.reserved_until else None,
+            "confirmed": slot.confirmed
+        })
+    return serialized

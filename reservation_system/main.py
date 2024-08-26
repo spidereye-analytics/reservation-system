@@ -61,7 +61,8 @@ Instrumentator().instrument(app).expose(app, include_in_schema=False, endpoint="
 
 
 def start_server():
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.getenv('PORT', 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
 
 
 def create_tables():
@@ -73,13 +74,7 @@ def create_tables():
 
 
 def run_migrations(action, revision=None, message=None):
-    # Inline Alembic configuration
-    database_url = os.getenv('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/reservation')
-
-    alembic_cfg = Config()
-    alembic_cfg.set_main_option('sqlalchemy.url', database_url)
-    alembic_cfg.set_main_option('script_location',
-                                'alembic')  # Adjust this if your migrations are in a different directory
+    alembic_cfg = Config("alembic.ini")
 
     if action == "upgrade":
         command.upgrade(alembic_cfg, "head")
@@ -97,7 +92,6 @@ def run_migrations(action, revision=None, message=None):
         command.current(alembic_cfg)
     else:
         print("Invalid action specified for migrations.")
-
 
 def clear_redis_cache():
     redis_client = get_redis_client()

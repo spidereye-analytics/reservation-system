@@ -1,104 +1,53 @@
+import logging
 import pytest
 import requests
 import random
 import string
 from datetime import datetime, timedelta, timezone
+from dateutil.parser import parse
 
 BASE_URL = "http://localhost:8000"
-
 
 @pytest.fixture(scope="module")
 def base_url():
     return BASE_URL
 
+def generate_random_email(role):
+    return f"test_{role}_{''.join(random.choices(string.ascii_lowercase + string.digits, k=8))}@example.com"
+
+def register_user(base_url, role):
+    user_data = {
+        "name": f"Test {role.capitalize()}",
+        "email": generate_random_email(role),
+        "password": "testpassword123",
+        "role": role
+    }
+    response = requests.post(f"{base_url}/register", json=user_data)
+    assert response.status_code == 200, f"{role.capitalize()} registration failed: {response.text}"
+    return response.json()["id"], user_data["email"], user_data["password"]
+
+def login_user(base_url, email, password):
+    login_data = {
+        "username": email,
+        "password": password
+    }
+    response = requests.post(f"{base_url}/token", data=login_data)
+    assert response.status_code == 200, f"Login failed: {response.text}"
+    return response.json()["access_token"]
 
 @pytest.fixture
-def get_tokens():
-    def create_user(role):
-        email = f"test_{role}_{''.join(random.choices(string.ascii_lowercase + string.digits, k=8))}@example.com"
-        password = "testpassword123"
+def get_tokens(base_url):
+    provider_id, provider_email, provider_password = register_user(base_url, "provider")
+    patient_id, patient_email, patient_password = register_user(base_url, "patient")
+    admin_id, admin_email, admin_password = register_user(base_url, "admin")
 
-        # Register user
-        register_response = requests.post(f"{BASE_URL}/register", json={
-            "name": f"Test {role.capitalize()}",
-            "email": email,
-            "password": password,
-            "role": role
-        })
-        assert register_response.status_code == 200, f"{role.capitalize()} registration failed: {register_response.text}"
-        user_id = register_response.json()["id"]
-
-        # Login
-        login_response = requests.post(f"{BASE_URL}/token", data={
-            "username": email,
-            "password": password
-        })
-        assert login_response.status_code == 200, f"{role.capitalize()} login failed: {login_response.text}"
-        token = login_response.json()["access_token"]
-
-        return token, user_id
-
-    provider_token, provider_id = create_user("provider")
-    patient_token, patient_id = create_user("patient")
-    # Admin token and ID will only be used for test_get_providers
-    admin_token, admin_id = create_user("admin")
+    provider_token = login_user(base_url, provider_email, provider_password)
+    patient_token = login_user(base_url, patient_email, patient_password)
+    admin_token = login_user(base_url, admin_email, admin_password)
 
     return provider_token, patient_token, admin_token, provider_id, patient_id, admin_id
 
-
-def test_user_registration(base_url):
-    def generate_random_email(role):
-        return f"test_{role}_{''.join(random.choices(string.ascii_lowercase + string.digits, k=8))}@example.com"
-
-    def register_user(role):
-        user_data = {
-            "name": f"Test {role.capitalize()}",
-            "email": generate_random_email(role),
-            "password": "testpassword123",
-            "role": role
-        }
-        response = requests.post(f"{base_url}/register", json=user_data)
-        assert response.status_code == 200, f"{role.capitalize()} registration failed: {response.text}"
-        assert "id" in response.json(), f"User ID not found in response: {response.text}"
-
-    register_user("provider")
-    register_user("patient")
-
-
-def test_user_login(base_url):
-    def register_and_login(role):
-        email = f"test_{role}_{''.join(random.choices(string.ascii_lowercase + string.digits, k=8))}@example.com"
-        password = "testpassword123"
-
-        # Register
-        register_data = {
-            "name": f"Test {role.capitalize()}",
-            "email": email,
-            "password": password,
-            "role": role
-        }
-        register_response = requests.post(f"{base_url}/register", json=register_data)
-        assert register_response.status_code == 200, f"{role.capitalize()} registration failed: {register_response.text}"
-
-        # Login
-        login_data = {
-            "username": email,
-            "password": password
-        }
-        login_response = requests.post(f"{base_url}/token", data=login_data)
-        assert login_response.status_code == 200, f"{role.capitalize()} login failed: {login_response.text}"
-        assert "access_token" in login_response.json()
-
-    register_and_login("provider")
-    register_and_login("patient")
-
-
-def test_provider_availability(base_url, get_tokens):
-    provider_token, _, _, provider_id, _, _ = get_tokens
-
-    # Set availability
-    start_date = datetime.now(timezone.utc).date()
-    end_date = start_date + timedelta(days=30)
+def set_provider_availability(base_url, provider_id, provider_token, start_date, end_date, exceptions=None):
     availability_data = {
         "general_schedule": {
             "start_date": start_date.isoformat(),
@@ -107,7 +56,7 @@ def test_provider_availability(base_url, get_tokens):
                 {"days": "M-F", "start": "9am", "end": "5pm"},
             ]
         },
-        "exceptions": [],
+        "exceptions": exceptions or [],
         "manual_appointment_slots": []
     }
     response = requests.post(
@@ -115,129 +64,117 @@ def test_provider_availability(base_url, get_tokens):
         json=availability_data,
         headers={"Authorization": f"Bearer {provider_token}"}
     )
-    assert response.status_code == 200
-    assert response.json() == {"message": "Availability set successfully"}
+    assert response.status_code == 200, f"Setting provider availability failed: {response.text}"
 
-    # Get availability
-    start_date = datetime.now(timezone.utc).date()
-    end_date = start_date + timedelta(days=7)
+def get_available_slots(base_url, provider_id, token, start_date, end_date):
     response = requests.get(
         f"{base_url}/providers/{provider_id}/time-slots",
         params={"start_date": start_date.isoformat(), "end_date": end_date.isoformat()},
-        headers={"Authorization": f"Bearer {provider_token}"}
+        headers={"Authorization": f"Bearer {token}"}
     )
-    assert response.status_code == 200
-    slots = response.json()
+    assert response.status_code == 200, f"Get available slots failed: {response.text}"
+    return response.json()
+
+def reserve_appointment(base_url, provider_id, start_time, token):
+    reserve_data = {
+        "provider_id": provider_id,
+        "start_time": start_time
+    }
+    response = requests.post(
+        f"{base_url}/appointments/reserve",
+        json=reserve_data,
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 200, f"Reserve appointment failed: {response.text}"
+    return response.json()["slot_id"]
+
+def confirm_appointment(base_url, slot_id, token):
+    confirm_data = {"slot_id": slot_id}
+    response = requests.post(
+        f"{base_url}/appointments/confirm",
+        json=confirm_data,
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 200, f"Confirm appointment failed: {response.text}"
+
+def cancel_appointment(base_url, slot_id, token):
+    cancel_data = {"slot_id": slot_id}
+    response = requests.post(
+        f"{base_url}/appointments/cancel",
+        json=cancel_data,
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 200, f"Cancel appointment failed: {response.text}"
+    return response.json()
+
+def get_booked_appointments(base_url, provider_id, token, start_date, end_date):
+    response = requests.get(
+        f"{base_url}/providers/{provider_id}/booked-appointments",
+        params={"start_date": start_date.isoformat(), "end_date": end_date.isoformat()},
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 200, f"Get booked appointments failed: {response.text}"
+    return response.json()
+
+# Test cases
+
+def test_user_registration(base_url):
+    register_user(base_url, "provider")
+    register_user(base_url, "patient")
+
+def test_user_login(base_url):
+    for role in ["provider", "patient"]:
+        user_id, email, password = register_user(base_url, role)
+        token = login_user(base_url, email, password)
+        assert token, f"{role.capitalize()} login failed"
+
+def test_provider_availability(base_url, get_tokens):
+    provider_token, _, _, provider_id, _, _ = get_tokens
+    start_date = datetime.now(timezone.utc).date() + timedelta(days=2)
+    end_date = start_date + timedelta(days=30)
+
+    set_provider_availability(base_url, provider_id, provider_token, start_date, end_date)
+
+    slots = get_available_slots(base_url, provider_id, provider_token, start_date, start_date + timedelta(days=7))
     assert len(slots) > 0
     assert all(slot["status"] == "available" for slot in slots)
 
-
 def test_patient_reserve_appointment(base_url, get_tokens):
     provider_token, patient_token, _, provider_id, _, _ = get_tokens
-
-    # Set provider availability
-    start_date = datetime.now(timezone.utc).date()
+    start_date = datetime.now(timezone.utc).date() + timedelta(days=2)
     end_date = start_date + timedelta(days=30)
-    availability_data = {
-        "general_schedule": {
-            "start_date": start_date.isoformat(),
-            "end_date": end_date.isoformat(),
-            "times": [
-                {"days": "M-F", "start": "9am", "end": "5pm"},
-            ]
-        },
-        "exceptions": [],
-        "manual_appointment_slots": []
-    }
-    provider_response = requests.post(
-        f"{base_url}/providers/{provider_id}/availability",
-        json=availability_data,
-        headers={"Authorization": f"Bearer {provider_token}"}
-    )
-    assert provider_response.status_code == 200
 
-    # Get available slots
-    slots_response = requests.get(
-        f"{base_url}/providers/{provider_id}/time-slots",
-        params={"start_date": (start_date + timedelta(days=1)).isoformat(),
-                "end_date": (start_date + timedelta(days=2)).isoformat()},
-        headers={"Authorization": f"Bearer {patient_token}"}
-    )
-    assert slots_response.status_code == 200
-    slots = slots_response.json()
+    set_provider_availability(base_url, provider_id, provider_token, start_date, end_date)
+
+    slots = get_available_slots(base_url, provider_id, patient_token, start_date, start_date + timedelta(days=1))
     assert len(slots) > 0
 
-    # Reserve an appointment
-    slot_to_reserve = slots[0]
-    reserve_data = {
-        "provider_id": provider_id,
-        "start_time": slot_to_reserve["start_time"]
-    }
-    reserve_response = requests.post(
-        f"{base_url}/appointments/reserve",
-        json=reserve_data,
-        headers={"Authorization": f"Bearer {patient_token}"}
-    )
-    assert reserve_response.status_code == 200
-    assert "slot_id" in reserve_response.json()
+    slot_id = reserve_appointment(base_url, provider_id, slots[0]["start_time"], patient_token)
+    assert slot_id
 
-
-def test_get_provider_booked_appointments(base_url, get_tokens):
+def test_24_hour_advance_booking_rule(base_url, get_tokens):
     provider_token, patient_token, _, provider_id, _, _ = get_tokens
+    tomorrow = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    end_date = tomorrow + timedelta(days=7)
 
-    # Set provider availability
-    start_date = datetime.now(timezone.utc).date()
-    end_date = start_date + timedelta(days=30)
-    availability_data = {
-        "general_schedule": {
-            "start_date": start_date.isoformat(),
-            "end_date": end_date.isoformat(),
-            "times": [
-                {"days": "M-F", "start": "9am", "end": "5pm"},
-            ]
-        },
-        "exceptions": [],
-        "manual_appointment_slots": []
-    }
-    requests.post(
-        f"{base_url}/providers/{provider_id}/availability",
-        json=availability_data,
-        headers={"Authorization": f"Bearer {provider_token}"}
-    )
+    set_provider_availability(base_url, provider_id, provider_token, tomorrow.date(), end_date.date())
 
-    # Book an appointment
-    slots_response = requests.get(
-        f"{base_url}/providers/{provider_id}/time-slots",
-        params={"start_date": (start_date + timedelta(days=1)).isoformat(),
-                "end_date": (start_date + timedelta(days=2)).isoformat()},
-        headers={"Authorization": f"Bearer {patient_token}"}
-    )
-    slots = slots_response.json()
-    slot_to_reserve = slots[0]
+    # Try to book less than 24 hours in advance
+    less_than_24h = datetime.now(timezone.utc) + timedelta(hours=23)
+    with pytest.raises(AssertionError):
+        reserve_appointment(base_url, provider_id, less_than_24h.isoformat(), patient_token)
 
-    reserve_response = requests.post(
-        f"{base_url}/appointments/reserve",
-        json={"provider_id": provider_id, "start_time": slot_to_reserve["start_time"]},
-        headers={"Authorization": f"Bearer {patient_token}"}
-    )
-    assert reserve_response.status_code == 200
+    # Book more than 24 hours in advance
+    more_than_24h = tomorrow + timedelta(days=1, hours=9)
+    slot_id = reserve_appointment(base_url, provider_id, more_than_24h.isoformat(), patient_token)
+    assert slot_id
 
-    # Get booked appointments
-    booked_response = requests.get(
-        f"{base_url}/providers/{provider_id}/booked-appointments",
-        params={"start_date": start_date.isoformat(), "end_date": end_date.isoformat()},
-        headers={"Authorization": f"Bearer {provider_token}"}
-    )
-    assert booked_response.status_code == 200
-    booked_appointments = booked_response.json()
-    assert len(booked_appointments) > 0
-    assert booked_appointments[0]["start_time"] == slot_to_reserve["start_time"]
-
+    booked_appointments = get_booked_appointments(base_url, provider_id, provider_token, tomorrow.date(), end_date.date())
+    assert any(appointment["id"] == slot_id for appointment in booked_appointments)
 
 def test_get_providers(base_url, get_tokens):
     _, _, admin_token, _, _, _ = get_tokens
 
-    # Get the list of providers
     response = requests.get(
         f"{base_url}/providers",
         headers={"Authorization": f"Bearer {admin_token}"}
@@ -245,218 +182,93 @@ def test_get_providers(base_url, get_tokens):
     assert response.status_code == 200, f"Get providers failed: {response.text}"
     providers = response.json()
     assert len(providers) > 0
-    assert "id" in providers[0] and "name" in providers[0] and "email" in providers[0]
-
+    assert all(key in providers[0] for key in ["id", "name", "email"])
 
 def test_patient_reserve_multiple_appointments(base_url, get_tokens):
     provider_token, patient_token, _, provider_id, _, _ = get_tokens
-
-    # Set provider availability
-    start_date = datetime.now(timezone.utc).date()
+    start_date = datetime.now(timezone.utc).date() + timedelta(days=2)
     end_date = start_date + timedelta(days=30)
-    availability_data = {
-        "general_schedule": {
-            "start_date": start_date.isoformat(),
-            "end_date": end_date.isoformat(),
-            "times": [
-                {"days": "M-F", "start": "9am", "end": "5pm"},
-            ]
-        },
-        "exceptions": [],
-        "manual_appointment_slots": []
-    }
-    requests.post(
-        f"{base_url}/providers/{provider_id}/availability",
-        json=availability_data,
-        headers={"Authorization": f"Bearer {provider_token}"}
-    )
 
-    # Get available slots
-    slots_response = requests.get(
-        f"{base_url}/providers/{provider_id}/time-slots",
-        params={"start_date": (start_date + timedelta(days=1)).isoformat(),
-                "end_date": (start_date + timedelta(days=2)).isoformat()},
-        headers={"Authorization": f"Bearer {patient_token}"}
-    )
-    slots = slots_response.json()
+    set_provider_availability(base_url, provider_id, provider_token, start_date, end_date)
+
+    slots = get_available_slots(base_url, provider_id, patient_token, start_date, start_date + timedelta(days=1))
     assert len(slots) >= 2
 
-    # Reserve two appointments
-    slot_to_reserve_1 = slots[0]
-    slot_to_reserve_2 = slots[1]
+    slot_id_1 = reserve_appointment(base_url, provider_id, slots[0]["start_time"], patient_token)
+    slot_id_2 = reserve_appointment(base_url, provider_id, slots[1]["start_time"], patient_token)
 
-    reserve_response_1 = requests.post(
-        f"{base_url}/appointments/reserve",
-        json={"provider_id": provider_id, "start_time": slot_to_reserve_1["start_time"]},
-        headers={"Authorization": f"Bearer {patient_token}"}
-    )
-    assert reserve_response_1.status_code == 200
-
-    reserve_response_2 = requests.post(
-        f"{base_url}/appointments/reserve",
-        json={"provider_id": provider_id, "start_time": slot_to_reserve_2["start_time"]},
-        headers={"Authorization": f"Bearer {patient_token}"}
-    )
-    assert reserve_response_2.status_code == 200
-
+    assert slot_id_1 and slot_id_2
 
 def test_provider_availability_with_exceptions(base_url, get_tokens):
     provider_token, _, _, provider_id, _, _ = get_tokens
-
-    # Set availability with exceptions
-    start_date = datetime.now(timezone.utc).date()
+    start_date = datetime.now(timezone.utc).date() + timedelta(days=2)
     end_date = start_date + timedelta(days=30)
-    availability_data = {
-        "general_schedule": {
-            "start_date": start_date.isoformat(),
-            "end_date": end_date.isoformat(),
-            "times": [
-                {"days": "M-F", "start": "9am", "end": "5pm"},
-            ]
-        },
-        "exceptions": [
-            {"date": (start_date + timedelta(days=7)).isoformat(), "times": [{"start": "1pm", "end": "2pm"}]}
-        ],
-        "manual_appointment_slots": []
-    }
-    response = requests.post(
-        f"{base_url}/providers/{provider_id}/availability",
-        json=availability_data,
-        headers={"Authorization": f"Bearer {provider_token}"}
-    )
-    assert response.status_code == 200, f"Set availability with exceptions failed: {response.text}"
+    exception_date = start_date + timedelta(days=7)
 
-    # Get availability to check exceptions
-    response = requests.get(
-        f"{base_url}/providers/{provider_id}/time-slots",
-        params={"start_date": start_date.isoformat(), "end_date": end_date.isoformat()},
-        headers={"Authorization": f"Bearer {provider_token}"}
-    )
-    assert response.status_code == 200
-    slots = response.json()
+    exceptions = [
+        {"date": exception_date.isoformat(), "times": [{"start": "1pm", "end": "2pm"}]}
+    ]
 
-    # Ensure all slots are captured and counted correctly
-    exception_date = (start_date + timedelta(days=7)).isoformat()
-    exception_slots = [slot for slot in slots if slot["start_time"].startswith(exception_date)]
-    assert len(exception_slots) == 4  # Expect 4 slots
+    set_provider_availability(base_url, provider_id, provider_token, start_date, end_date, exceptions)
 
+    slots = get_available_slots(base_url, provider_id, provider_token, start_date, end_date)
+    exception_slots = [slot for slot in slots if slot["start_time"].startswith(exception_date.isoformat())]
+    assert len(exception_slots) == 4  # Expect 4 slots (1 hour divided into 15-minute slots)
+
+def test_get_provider_booked_appointments(base_url, get_tokens):
+    provider_token, patient_token, _, provider_id, _, _ = get_tokens
+    start_date = datetime.now(timezone.utc).date() + timedelta(days=2)
+    end_date = start_date + timedelta(days=30)
+
+    set_provider_availability(base_url, provider_id, provider_token, start_date, end_date)
+
+    slots = get_available_slots(base_url, provider_id, patient_token, start_date, start_date + timedelta(days=1))
+    slot_id = reserve_appointment(base_url, provider_id, slots[0]["start_time"], patient_token)
+
+    booked_appointments = get_booked_appointments(base_url, provider_id, provider_token, start_date, end_date)
+    assert len(booked_appointments) > 0
+
+    booked_appointment = next((appointment for appointment in booked_appointments if appointment["id"] == slot_id), None)
+    assert booked_appointment is not None
+    assert booked_appointment["provider_id"] == provider_id
+    assert booked_appointment["status"] == "booked"
+    assert booked_appointment["confirmed"] is True
 
 def test_confirm_appointment(base_url, get_tokens):
     provider_token, patient_token, _, provider_id, _, _ = get_tokens
-
-    # Set provider availability and reserve an appointment
-    start_date = datetime.now(timezone.utc).date()
+    start_date = datetime.now(timezone.utc).date() + timedelta(days=2)
     end_date = start_date + timedelta(days=30)
-    availability_data = {
-        "general_schedule": {
-            "start_date": start_date.isoformat(),
-            "end_date": end_date.isoformat(),
-            "times": [
-                {"days": "M-F", "start": "9am", "end": "5pm"},
-            ]
-        },
-        "exceptions": [],
-        "manual_appointment_slots": []
-    }
-    requests.post(
-        f"{base_url}/providers/{provider_id}/availability",
-        json=availability_data,
-        headers={"Authorization": f"Bearer {provider_token}"}
-    )
 
-    slots_response = requests.get(
-        f"{base_url}/providers/{provider_id}/time-slots",
-        params={"start_date": (start_date + timedelta(days=1)).isoformat(),
-                "end_date": (start_date + timedelta(days=2)).isoformat()},
-        headers={"Authorization": f"Bearer {patient_token}"}
-    )
-    slots = slots_response.json()
-    assert len(slots) > 0, "No available slots found to reserve"
+    set_provider_availability(base_url, provider_id, provider_token, start_date, end_date)
 
-    slot_to_reserve = slots[0]
+    slots = get_available_slots(base_url, provider_id, patient_token, start_date, start_date + timedelta(days=1))
+    slot_id = reserve_appointment(base_url, provider_id, slots[0]["start_time"], patient_token)
 
-    reserve_response = requests.post(
-        f"{base_url}/appointments/reserve",
-        json={"provider_id": provider_id, "start_time": slot_to_reserve["start_time"]},
-        headers={"Authorization": f"Bearer {patient_token}"}
-    )
-    assert reserve_response.status_code == 200, f"Reserve appointment failed: {reserve_response.text}"
-    slot_id = reserve_response.json()["slot_id"]
+    confirm_appointment(base_url, slot_id, patient_token)
 
-    # Confirm the appointment
-    confirm_data = {"slot_id": slot_id}
-    confirm_response = requests.post(
-        f"{base_url}/appointments/confirm",
-        json=confirm_data,
-        headers={"Authorization": f"Bearer {patient_token}"}
-    )
-    assert confirm_response.status_code == 200, f"Confirm appointment failed: {confirm_response.text}"
-    assert confirm_response.json() == {"message": "Reservation confirmed successfully"}
-
-    # Verify the slot is now confirmed
-    booked_response = requests.get(
-        f"{base_url}/providers/{provider_id}/booked-appointments",
-        params={"start_date": start_date.isoformat(), "end_date": end_date.isoformat()},
-        headers={"Authorization": f"Bearer {provider_token}"}
-    )
-    assert booked_response.status_code == 200, f"Get booked appointments failed: {booked_response.text}"
-    booked_appointments = booked_response.json()
-    confirmed_appointment = next((appointment for appointment in booked_appointments if appointment["id"] == slot_id),
-                                 None)
-    assert confirmed_appointment is not None, "Confirmed appointment not found"
-    assert confirmed_appointment["confirmed"] is True, "Appointment was not marked as confirmed"
-
+    booked_appointments = get_booked_appointments(base_url, provider_id, provider_token, start_date, end_date)
+    confirmed_appointment = next((appointment for appointment in booked_appointments if appointment["id"] == slot_id), None)
+    assert confirmed_appointment is not None
+    assert confirmed_appointment["confirmed"] is True
 
 def test_cancel_appointment(base_url, get_tokens):
-    provider_token, patient_token, _, provider_id, patient_id, _ = get_tokens
-
-    # Set provider availability and book an appointment
-    start_date = datetime.now(timezone.utc).date()
+    provider_token, patient_token, _, provider_id, _, _ = get_tokens
+    start_date = datetime.now(timezone.utc).date() + timedelta(days=2)
     end_date = start_date + timedelta(days=30)
-    availability_data = {
-        "general_schedule": {
-            "start_date": start_date.isoformat(),
-            "end_date": end_date.isoformat(),
-            "times": [
-                {"days": "M-F", "start": "9am", "end": "5pm"},
-            ]
-        },
-        "exceptions": [],
-        "manual_appointment_slots": []
-    }
-    requests.post(
-        f"{base_url}/providers/{provider_id}/availability",
-        json=availability_data,
-        headers={"Authorization": f"Bearer {provider_token}"}
-    )
 
-    slots_response = requests.get(
-        f"{base_url}/providers/{provider_id}/time-slots",
-        params={"start_date": (start_date + timedelta(days=1)).isoformat(),
-                "end_date": (start_date + timedelta(days=2)).isoformat()},
-        headers={"Authorization": f"Bearer {patient_token}"}
-    )
-    slots = slots_response.json()
-    assert len(slots) > 0, "No available slots found to reserve"
+    set_provider_availability(base_url, provider_id, provider_token, start_date, end_date)
 
-    slot_to_reserve = slots[0]
+    slots = get_available_slots(base_url, provider_id, patient_token, start_date, start_date + timedelta(days=1))
+    slot_id = reserve_appointment(base_url, provider_id, slots[0]["start_time"], patient_token)
+    confirm_appointment(base_url, slot_id, patient_token)
 
-    reserve_response = requests.post(
-        f"{base_url}/appointments/reserve",
-        json={"provider_id": provider_id, "start_time": slot_to_reserve["start_time"]},
-        headers={"Authorization": f"Bearer {patient_token}"}
-    )
-    assert reserve_response.status_code == 200, f"Reserve appointment failed: {reserve_response.text}"
-    slot_id = reserve_response.json()["slot_id"]
+    cancel_result = cancel_appointment(base_url, slot_id, patient_token)
+    assert cancel_result["message"] == "Appointment cancelled successfully"
+    assert cancel_result["slot_id"] == slot_id
 
-    # Cancel the appointment
-    cancel_data = {"slot_id": slot_id}
-    cancel_response = requests.post(
-        f"{base_url}/appointments/cancel",
-        json=cancel_data,
-        headers={"Authorization": f"Bearer {patient_token}"}
-    )
-    assert cancel_response.status_code == 200, f"Cancel appointment failed: {cancel_response.text}"
-    resp = cancel_response.json()
-    assert  resp["message"] == "Appointment cancelled successfully"
-    assert slot_id == resp["slot_id"]
+    booked_appointments = get_booked_appointments(base_url, provider_id, provider_token, start_date, end_date)
+    cancelled_appointment = next((appointment for appointment in booked_appointments if appointment["id"] == slot_id), None)
+    assert cancelled_appointment is None
+
+    available_slots = get_available_slots(base_url, provider_id, patient_token, start_date, start_date + timedelta(days=1))
+    assert any(slot["id"] == slot_id for slot in available_slots)
