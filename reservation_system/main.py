@@ -1,8 +1,11 @@
 import sys
 import argparse
+import time
+
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends, Request
 from fastapi_sqlalchemy import DBSessionMiddleware
+from prometheus_client import Counter, Histogram
 from sqlalchemy import create_engine
 from alembic import command
 from alembic.config import Config
@@ -22,6 +25,29 @@ logging.basicConfig(
 )
 
 app = FastAPI()
+
+# Custom Prometheus metrics for specific routes
+ROUTE_REQUEST_COUNT = Counter("route_request_count", "Total number of requests per route", ["method", "endpoint"])
+ROUTE_REQUEST_LATENCY = Histogram("route_request_latency_seconds", "Request latency in seconds per route", ["method", "endpoint"])
+
+
+# Instrument the app with Prometheus metrics
+Instrumentator().instrument(app).expose(app, include_in_schema=False, endpoint="/metrics")
+
+# Middleware to track custom metrics
+@app.middleware("http")
+async def add_metrics(request: Request, call_next):
+    start_time = time.time()
+
+    # Process the request
+    response = await call_next(request)
+
+    # Update custom metrics
+    ROUTE_REQUEST_COUNT.labels(method=request.method, endpoint=request.url.path).inc()
+    ROUTE_REQUEST_LATENCY.labels(method=request.method, endpoint=request.url.path).observe(time.time() - start_time)
+
+    return response
+
 
 # Database configuration: This must be done before accessing db.session anywhere
 app.add_middleware(DBSessionMiddleware,
