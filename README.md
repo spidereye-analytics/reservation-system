@@ -1,7 +1,3 @@
-Here is a streamlined version of your README:
-
----
-
 # Reservation System
 
 This is a FastAPI-based reservation system where providers can submit their availability, clients can retrieve available slots, make reservations, and confirm them. The application also includes functionality for managing user authentication and authorization.
